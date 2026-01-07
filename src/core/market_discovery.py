@@ -47,6 +47,50 @@ class MarketDiscovery:
             self.logger.error(f"Failed to initialize Gamma client: {e}")
             raise
 
+    def _convert_to_dict(self, market_obj):
+        """
+        Convert GammaMarket object to dictionary
+
+        Args:
+            market_obj: GammaMarket object or dict
+
+        Returns:
+            Dictionary representation
+        """
+        # If already a dict, return as-is
+        if isinstance(market_obj, dict):
+            return market_obj
+
+        # Try Pydantic v2 method
+        if hasattr(market_obj, 'model_dump'):
+            return market_obj.model_dump()
+
+        # Try Pydantic v1 method
+        if hasattr(market_obj, 'dict'):
+            return market_obj.dict()
+
+        # Try dataclass conversion
+        if hasattr(market_obj, '__dict__'):
+            return market_obj.__dict__
+
+        # Last resort: access known attributes
+        try:
+            return {
+                'id': getattr(market_obj, 'id', None),
+                'question': getattr(market_obj, 'question', ''),
+                'description': getattr(market_obj, 'description', ''),
+                'conditionId': getattr(market_obj, 'condition_id', ''),
+                'slug': getattr(market_obj, 'slug', ''),
+                'endDate': getattr(market_obj, 'end_date', ''),
+                'category': getattr(market_obj, 'category', ''),
+                'liquidity': getattr(market_obj, 'liquidity', 0),
+                'volume': getattr(market_obj, 'volume', 0),
+                'active': getattr(market_obj, 'active', False),
+            }
+        except Exception as e:
+            self.logger.error(f"Failed to convert market object: {e}")
+            return {}
+
     async def get_all_markets(self, limit: int = 100) -> List[Dict]:
         """
         Get all markets using the REST API (fallback method)
@@ -63,7 +107,9 @@ class MarketDiscovery:
 
             if markets:
                 self.logger.info(f"Retrieved {len(markets)} markets")
-                return markets
+                # Convert GammaMarket objects to dictionaries
+                markets_dicts = [self._convert_to_dict(m) for m in markets]
+                return markets_dicts
             else:
                 self.logger.warning("No markets retrieved")
                 return []
@@ -97,7 +143,9 @@ class MarketDiscovery:
                     markets_list = results.markets
                     if markets_list:
                         self.logger.info(f"Found {len(markets_list)} markets for '{keyword}'")
-                        all_markets.extend(markets_list)
+                        # Convert GammaMarket objects to dictionaries
+                        markets_dicts = [self._convert_to_dict(m) for m in markets_list]
+                        all_markets.extend(markets_dicts)
                     else:
                         self.logger.warning(f"No markets found for keyword: {keyword}")
                 else:
@@ -166,7 +214,8 @@ class MarketDiscovery:
         """Get detailed information about a specific market"""
         try:
             market = self.gamma_client.get_market(market_id)
-            return market
+            # Convert to dictionary if needed
+            return self._convert_to_dict(market) if market else None
         except Exception as e:
             self.logger.error(f"Error fetching market {market_id}: {e}")
             return None
