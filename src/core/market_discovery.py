@@ -55,26 +55,61 @@ class MarketDiscovery:
             market_obj: GammaMarket object or dict
 
         Returns:
-            Dictionary representation
+            Dictionary representation with proper type conversions
         """
-        # If already a dict, return as-is
+        # If already a dict, ensure numeric fields are floats
         if isinstance(market_obj, dict):
-            return market_obj
+            result = market_obj.copy()
+            # Ensure numeric fields are floats
+            for field in ['liquidity', 'volume']:
+                if field in result:
+                    try:
+                        result[field] = float(result[field]) if result[field] is not None else 0.0
+                    except (ValueError, TypeError):
+                        result[field] = 0.0
+            return result
 
         # Try Pydantic v2 method
         if hasattr(market_obj, 'model_dump'):
-            return market_obj.model_dump()
+            result = market_obj.model_dump()
+            # Ensure numeric fields are floats
+            for field in ['liquidity', 'volume']:
+                if field in result:
+                    try:
+                        result[field] = float(result[field]) if result[field] is not None else 0.0
+                    except (ValueError, TypeError):
+                        result[field] = 0.0
+            return result
 
         # Try Pydantic v1 method
         if hasattr(market_obj, 'dict'):
-            return market_obj.dict()
+            result = market_obj.dict()
+            # Ensure numeric fields are floats
+            for field in ['liquidity', 'volume']:
+                if field in result:
+                    try:
+                        result[field] = float(result[field]) if result[field] is not None else 0.0
+                    except (ValueError, TypeError):
+                        result[field] = 0.0
+            return result
 
         # Try dataclass conversion
         if hasattr(market_obj, '__dict__'):
-            return market_obj.__dict__
+            result = market_obj.__dict__.copy()
+            # Ensure numeric fields are floats
+            for field in ['liquidity', 'volume']:
+                if field in result:
+                    try:
+                        result[field] = float(result[field]) if result[field] is not None else 0.0
+                    except (ValueError, TypeError):
+                        result[field] = 0.0
+            return result
 
         # Last resort: access known attributes
         try:
+            liquidity_val = getattr(market_obj, 'liquidity', 0)
+            volume_val = getattr(market_obj, 'volume', 0)
+
             return {
                 'id': getattr(market_obj, 'id', None),
                 'question': getattr(market_obj, 'question', ''),
@@ -83,8 +118,8 @@ class MarketDiscovery:
                 'slug': getattr(market_obj, 'slug', ''),
                 'endDate': getattr(market_obj, 'end_date', ''),
                 'category': getattr(market_obj, 'category', ''),
-                'liquidity': getattr(market_obj, 'liquidity', 0),
-                'volume': getattr(market_obj, 'volume', 0),
+                'liquidity': float(liquidity_val) if liquidity_val is not None else 0.0,
+                'volume': float(volume_val) if volume_val is not None else 0.0,
                 'active': getattr(market_obj, 'active', False),
             }
         except Exception as e:
@@ -283,12 +318,23 @@ class MarketDiscovery:
         self.logger.info(f"{'='*80}\n")
 
         for i, market in enumerate(markets, 1):
+            # Safely convert volume and liquidity to floats
+            try:
+                liquidity = float(market.get('liquidity', 0))
+            except (ValueError, TypeError):
+                liquidity = 0.0
+
+            try:
+                volume = float(market.get('volume', 0))
+            except (ValueError, TypeError):
+                volume = 0.0
+
             self.logger.info(f"{i}. {market.get('question')}")
             self.logger.info(f"   ID: {market.get('id')}")
             self.logger.info(f"   Condition ID: {market.get('conditionId')}")
             self.logger.info(f"   Category: {market.get('category')}")
-            self.logger.info(f"   Liquidity: ${market.get('liquidity', 0):,.2f}")
-            self.logger.info(f"   Volume: ${market.get('volume', 0):,.2f}")
+            self.logger.info(f"   Liquidity: ${liquidity:,.2f}")
+            self.logger.info(f"   Volume: ${volume:,.2f}")
             self.logger.info(f"   End Date: {market.get('endDate')}")
             self.logger.info(f"   Active: {market.get('active')}")
             self.logger.info(f"   URL: https://polymarket.com/event/{market.get('slug')}\n")
