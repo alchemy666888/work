@@ -157,8 +157,13 @@ class PolymarketWebSocketClient:
         """Gracefully disconnect from WebSocket"""
         try:
             self.is_connected = False
-            if self.ws_client:
-                await self.ws_client.close()
+            # The polymarket-apis library handles cleanup internally
+            # Check if close method exists before calling
+            if self.ws_client and hasattr(self.ws_client, 'close'):
+                if asyncio.iscoroutinefunction(self.ws_client.close):
+                    await self.ws_client.close()
+                else:
+                    self.ws_client.close()
             self.logger.info("WebSocket disconnected")
         except Exception as e:
             self.logger.error(f"Error during disconnect: {e}")

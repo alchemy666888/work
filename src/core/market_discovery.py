@@ -47,6 +47,31 @@ class MarketDiscovery:
             self.logger.error(f"Failed to initialize Gamma client: {e}")
             raise
 
+    async def get_all_markets(self, limit: int = 100) -> List[Dict]:
+        """
+        Get all markets using the REST API (fallback method)
+
+        Args:
+            limit: Maximum number of markets to fetch
+
+        Returns:
+            List of market dictionaries
+        """
+        try:
+            self.logger.info(f"Fetching up to {limit} markets via REST API...")
+            markets = self.gamma_client.get_markets(limit=limit, active=True)
+
+            if markets:
+                self.logger.info(f"Retrieved {len(markets)} markets")
+                return markets
+            else:
+                self.logger.warning("No markets retrieved")
+                return []
+
+        except Exception as e:
+            self.logger.error(f"Error fetching markets: {e}")
+            return []
+
     async def search_btc_markets(self, keywords: Optional[List[str]] = None) -> List[Dict]:
         """
         Search for BTC-related markets
@@ -67,14 +92,34 @@ class MarketDiscovery:
                 self.logger.info(f"Searching for markets with keyword: {keyword}")
                 results = self.gamma_client.search(keyword)
 
-                if results:
-                    self.logger.info(f"Found {len(results)} markets for '{keyword}'")
-                    all_markets.extend(results)
+                # SearchResult object has a .markets attribute containing the list
+                if results and hasattr(results, 'markets'):
+                    markets_list = results.markets
+                    if markets_list:
+                        self.logger.info(f"Found {len(markets_list)} markets for '{keyword}'")
+                        all_markets.extend(markets_list)
+                    else:
+                        self.logger.warning(f"No markets found for keyword: {keyword}")
                 else:
                     self.logger.warning(f"No markets found for keyword: {keyword}")
 
             except Exception as e:
                 self.logger.error(f"Error searching for keyword '{keyword}': {e}")
+
+        # If no markets found via search, try REST API fallback
+        if not all_markets:
+            self.logger.info("Search returned no results, trying REST API fallback...")
+            all_markets_list = await self.get_all_markets(limit=100)
+
+            # Filter for BTC-related markets
+            for market in all_markets_list:
+                question = market.get('question', '').lower()
+                description = market.get('description', '').lower()
+                if any(term in question or term in description for term in ['bitcoin', 'btc']):
+                    all_markets.append(market)
+
+            if all_markets:
+                self.logger.info(f"Found {len(all_markets)} BTC markets via REST API")
 
         # Remove duplicates based on market ID
         unique_markets = {market.get('id'): market for market in all_markets}
