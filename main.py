@@ -5,258 +5,278 @@ Main application entry point
 """
 
 import asyncio
+import signal
 import sys
-from datetime import datetime
-from src.core.market_discovery import MarketDiscovery
-from src.core.websocket_client import PolymarketWebSocketClient, MarketDataProcessor
-from src.alerts.alert_system import AlertSystem
-from src.ui.terminal_dashboard import TerminalDashboard, SimpleTerminalDisplay
-from src.utils.config import config
-from src.utils.logger import setup_logger
+from typing import Set
 
-logger = setup_logger(__name__)
+from rich.console import Console
+from rich.live import Live
+
+from config import config
+from api.gamma_api import GammaAPIClient
+from ws.websocket_client import PolymarketWebSocket
+from models.market import Market
+from models.market_state import MarketState
+from models.events import (
+    WebSocketEvent,
+    BestBidAskEvent,
+    LastTradePriceEvent,
+    OrderBookEvent,
+)
+from analytics.alerts import AlertManager
+from utils.time_utils import generate_current_and_next_slugs, get_current_interval_info
+from utils.formatting import (
+    create_market_table,
+    print_startup_banner,
+    console,
+)
+from utils.logger import setup_logger, logger
+
+
+# Initialize logger
+setup_logger(config.log_level)
 
 
 class BTCMonitor:
     """Main BTC Market Monitor application"""
 
-    def __init__(self, use_rich_ui: bool = True):
-        self.logger = setup_logger(__name__)
-        self.market_discovery = MarketDiscovery()
-        self.ws_client = PolymarketWebSocketClient()
-        self.data_processor = MarketDataProcessor()
-        self.alert_system = AlertSystem()
+    def __init__(self):
+        self.ws_client = PolymarketWebSocket(
+            url=config.ws_url,
+            ping_interval=config.ping_interval,
+            reconnect_base_delay=config.reconnect_base_delay,
+            max_reconnect_delay=config.max_reconnect_delay,
+        )
+        self.alert_manager = AlertManager(
+            price_swing_threshold=config.price_swing_threshold,
+            price_swing_window=config.price_swing_window,
+            volume_spike_multiplier=config.volume_spike_multiplier,
+            market_closing_alert=config.market_closing_alert,
+        )
 
-        # UI setup
-        self.use_rich_ui = use_rich_ui and config.monitoring.enable_terminal_ui
-        if self.use_rich_ui:
-            self.dashboard = TerminalDashboard()
-        else:
-            self.simple_display = SimpleTerminalDisplay()
+        # Market state tracking: asset_id -> MarketState
+        self.market_states: dict[str, MarketState] = {}
 
-        self.monitored_markets = {}
+        # Market metadata: market_id -> Market
+        self.markets: dict[str, Market] = {}
+
         self.running = False
 
-    async def initialize(self):
-        """Initialize the monitor"""
-        self.logger.info("🚀 Initializing Polymarket BTC Monitor...")
+    async def discover_markets(self) -> tuple[Market | None, Market | None]:
+        """
+        Fetch current and next BTC markets.
 
-        # Discover BTC markets
-        self.logger.info("🔍 Discovering BTC 15-minute markets...")
-        try:
-            markets = await self.market_discovery.find_btc_15m_markets()
+        Returns:
+            Tuple of (current_market, next_market)
+        """
+        slugs = generate_current_and_next_slugs(config.base_slug)
 
-            if not markets:
-                self.logger.warning("⚠️  No BTC 15-minute markets found!")
-                self.logger.info("📋 Searching for any BTC markets...")
+        async with GammaAPIClient(config.gamma_api_base) as api:
+            # Try to fetch by slug
+            logger.info(f"Fetching market: {slugs['current']}")
+            current_market = await api.get_market_by_slug(slugs["current"])
 
-                # Fallback: search for any BTC markets
-                all_btc_markets = await self.market_discovery.search_btc_markets()
-                active_markets = self.market_discovery.filter_active_markets(all_btc_markets)
+            logger.info(f"Fetching market: {slugs['next']}")
+            next_market = await api.get_market_by_slug(slugs["next"])
 
-                if active_markets:
-                    self.logger.info(f"Found {len(active_markets)} active BTC markets")
-                    self.market_discovery.display_market_summary(active_markets[:5])
+            # Fallback: search for any BTC 15m markets
+            if not current_market and not next_market:
+                logger.warning("Slug-based lookup failed, searching for BTC markets...")
+                btc_markets = await api.find_btc_15m_markets()
 
-                    # Use the first few markets for demonstration
-                    markets = active_markets[:3]
-                else:
-                    self.logger.error("❌ No BTC markets found at all!")
-                    return False
+                if btc_markets:
+                    current_market = btc_markets[0]
+                    if len(btc_markets) > 1:
+                        next_market = btc_markets[1]
 
-            self.logger.info(f"✅ Found {len(markets)} markets to monitor")
+            return current_market, next_market
 
-            # Store market info
-            for market in markets:
-                market_id = market.get('id')
-                self.monitored_markets[market_id] = market
+    def setup_market_states(self, current_market: Market | None, next_market: Market | None):
+        """
+        Create MarketState objects for each market outcome.
 
-                # Create alert for new market
-                await self.alert_system.check_new_market(market)
+        Args:
+            current_market: Current interval market
+            next_market: Next interval market
+        """
+        for market, is_current in [(current_market, True), (next_market, False)]:
+            if not market:
+                continue
 
-            return True
+            self.markets[market.id] = market
 
-        except Exception as e:
-            self.logger.error(f"❌ Failed to discover markets: {e}")
-            return False
+            # Create states for UP and DOWN outcomes
+            up_token = market.get_up_token_id()
+            down_token = market.get_down_token_id()
 
-    async def start_monitoring(self):
-        """Start the monitoring process"""
-        self.logger.info("📡 Starting WebSocket monitoring...")
+            if up_token:
+                self.market_states[up_token] = MarketState(
+                    market=market,
+                    outcome="UP",
+                    is_current=is_current,
+                )
+                # Set initial price if available
+                up_price = market.get_up_price()
+                if up_price is not None:
+                    self.market_states[up_token].update_price(up_price)
 
-        # Connect to WebSocket
-        connected = await self.ws_client.connect()
-        if not connected:
-            self.logger.error("❌ Failed to connect to WebSocket")
+            if down_token:
+                self.market_states[down_token] = MarketState(
+                    market=market,
+                    outcome="DOWN",
+                    is_current=is_current,
+                )
+                # Set initial price if available
+                down_price = market.get_down_price()
+                if down_price is not None:
+                    self.market_states[down_token].update_price(down_price)
+
+            # Alert for new market
+            self.alert_manager.create_new_market_alert(
+                market.slug, market.question
+            )
+
+    def get_asset_ids(self) -> Set[str]:
+        """Get all asset IDs to subscribe to."""
+        return set(self.market_states.keys())
+
+    async def handle_market_event(self, event: WebSocketEvent):
+        """
+        Process WebSocket events and update market states.
+
+        Args:
+            event: Parsed WebSocket event
+        """
+        asset_id = event.asset_id
+        if not asset_id or asset_id not in self.market_states:
             return
 
-        # Register message handler
-        self.ws_client.add_message_handler(self.handle_market_update)
+        state = self.market_states[asset_id]
 
-        # Subscribe to markets
-        for market_id in self.monitored_markets.keys():
-            # Note: In practice, you'd subscribe using token IDs not market IDs
-            # This is a simplified example
-            self.logger.info(f"📊 Subscribing to market: {market_id}")
-            # await self.ws_client.subscribe_to_market(market_id)
+        if isinstance(event, BestBidAskEvent):
+            # Update bid/ask prices
+            mid_price = event.get_mid_price()
+            if mid_price is not None:
+                state.update_price(mid_price)
 
-        self.running = True
-        self.logger.info("✅ Monitoring started!")
+                try:
+                    bid = float(event.best_bid) if event.best_bid else None
+                    ask = float(event.best_ask) if event.best_ask else None
+                    state.update_bid_ask(bid, ask)
+                except (ValueError, TypeError):
+                    pass
 
-        # Start heartbeat
-        asyncio.create_task(self.ws_client.send_heartbeat())
+        elif isinstance(event, LastTradePriceEvent):
+            # Record trade
+            price = event.get_price_float()
+            size = event.get_size_float()
+            if price is not None and size is not None:
+                state.add_trade(size, price)
 
-        # Start update loop
-        if self.use_rich_ui:
-            await self.run_dashboard()
-        else:
-            await self.run_simple_display()
+        elif isinstance(event, OrderBookEvent):
+            # Update from order book
+            mid_price = event.get_mid_price()
+            if mid_price is not None:
+                state.update_price(mid_price)
 
-    async def handle_market_update(self, message: dict):
-        """Handle incoming market updates from WebSocket"""
+            state.update_bid_ask(event.get_best_bid(), event.get_best_ask())
+
+        # Check for alerts
+        self.alert_manager.check_alerts(state)
+
+    async def run_live_dashboard(self):
+        """Run a live-updating terminal dashboard."""
         try:
-            # Process the message
-            await self.data_processor.process_message(message)
+            with Live(
+                create_market_table(self.market_states),
+                console=console,
+                refresh_per_second=config.refresh_rate,
+            ) as live:
+                while self.running:
+                    live.update(create_market_table(self.market_states))
+                    await asyncio.sleep(1 / config.refresh_rate)
+        except asyncio.CancelledError:
+            pass
 
-            # Get market data
-            asset_id = message.get('asset_id')
-            if asset_id:
-                # Check for price changes
-                odds = self.data_processor.get_current_odds(asset_id)
-                if odds is not None:
-                    market_question = self.monitored_markets.get(asset_id, {}).get('question', 'Unknown')
-                    await self.alert_system.check_price_change(asset_id, market_question, odds)
+    async def initialize(self) -> bool:
+        """
+        Initialize the monitor.
 
-        except Exception as e:
-            self.logger.error(f"Error handling market update: {e}")
+        Returns:
+            True if initialization successful
+        """
+        logger.info("Initializing Polymarket BTC Monitor...")
 
-    async def update_dashboard_data(self):
-        """Update data for dashboard display"""
-        for market_id, market in self.monitored_markets.items():
-            # Get latest data from processor
-            summary = self.data_processor.get_market_summary(market_id)
+        # Discover markets
+        logger.info("Discovering BTC 15-minute markets...")
+        current_market, next_market = await self.discover_markets()
 
-            # Calculate up/down odds (simplified)
-            up_odds = summary.get('odds_percentage', 50)
-            down_odds = 100 - up_odds
+        if not current_market and not next_market:
+            logger.error("No BTC markets found!")
+            return False
 
-            # Update dashboard data
-            dashboard_data = {
-                'question': market.get('question', 'Unknown'),
-                'up_odds': up_odds,
-                'down_odds': down_odds,
-                'volume': market.get('volume', 0),
-                'liquidity': market.get('liquidity', 0),
-                'end_time': self.format_time_remaining(market.get('endDate', ''))
-            }
+        # Setup market states
+        self.setup_market_states(current_market, next_market)
 
-            if self.use_rich_ui:
-                self.dashboard.update_market_data(market_id, dashboard_data)
-            else:
-                # For simple display, just store
+        logger.info(f"Monitoring {len(self.market_states)} outcomes")
+        return True
+
+    async def start(self):
+        """Start the monitoring process."""
+        self.running = True
+
+        # Get asset IDs to subscribe
+        asset_ids = self.get_asset_ids()
+        if not asset_ids:
+            logger.error("No assets to subscribe to")
+            return
+
+        logger.info(f"Subscribing to {len(asset_ids)} assets")
+
+        # Start dashboard in background
+        dashboard_task = asyncio.create_task(self.run_live_dashboard())
+
+        try:
+            # Connect to WebSocket (this runs until disconnected)
+            await self.ws_client.connect(asset_ids, self.handle_market_event)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            dashboard_task.cancel()
+            try:
+                await dashboard_task
+            except asyncio.CancelledError:
                 pass
 
-        # Update alerts
-        recent_alerts = self.alert_system.get_recent_alerts(limit=10)
-        for alert in recent_alerts:
-            alert_dict = {
-                'severity': alert.severity,
-                'message': alert.message,
-                'timestamp': alert.timestamp
-            }
-            if self.use_rich_ui:
-                self.dashboard.add_alert(alert_dict)
-
-    async def run_dashboard(self):
-        """Run the rich terminal dashboard"""
-        await self.dashboard.run(update_callback=self.update_dashboard_data)
-
-    async def run_simple_display(self):
-        """Run simple terminal display"""
-        try:
-            while self.running:
-                # Update data
-                await self.update_dashboard_data()
-
-                # Display
-                markets_data = []
-                for market_id, market in self.monitored_markets.items():
-                    summary = self.data_processor.get_market_summary(market_id)
-                    up_odds = summary.get('odds_percentage', 50)
-
-                    markets_data.append({
-                        'question': market.get('question'),
-                        'up_odds': up_odds,
-                        'down_odds': 100 - up_odds,
-                        'volume': market.get('volume', 0),
-                        'liquidity': market.get('liquidity', 0),
-                        'end_time': self.format_time_remaining(market.get('endDate', ''))
-                    })
-
-                alerts = self.alert_system.get_recent_alerts(limit=5)
-                alert_dicts = [
-                    {
-                        'severity': a.severity,
-                        'message': a.message,
-                        'timestamp': a.timestamp
-                    }
-                    for a in alerts
-                ]
-
-                self.simple_display.display_summary(markets_data, alert_dicts)
-
-                # Wait before next update
-                await asyncio.sleep(config.monitoring.update_interval)
-
-        except KeyboardInterrupt:
-            self.logger.info("Stopped by user")
-
-    def format_time_remaining(self, end_date_str: str) -> str:
-        """Format time remaining until market ends"""
-        try:
-            if not end_date_str:
-                return "Unknown"
-
-            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-            now = datetime.now(end_date.tzinfo)
-            remaining = end_date - now
-
-            if remaining.total_seconds() < 0:
-                return "Ended"
-
-            hours = int(remaining.total_seconds() // 3600)
-            minutes = int((remaining.total_seconds() % 3600) // 60)
-
-            if hours > 24:
-                days = hours // 24
-                return f"{days}d {hours % 24}h"
-            elif hours > 0:
-                return f"{hours}h {minutes}m"
-            else:
-                return f"{minutes}m"
-
-        except Exception:
-            return "Unknown"
-
     async def shutdown(self):
-        """Gracefully shutdown the monitor"""
-        self.logger.info("🛑 Shutting down...")
+        """Gracefully shutdown the monitor."""
+        logger.info("Shutting down...")
         self.running = False
         await self.ws_client.disconnect()
-        self.logger.info("✅ Shutdown complete")
+        logger.info("Shutdown complete")
 
 
 async def main():
-    """Main entry point"""
-    logger.info("="*80)
-    logger.info("  Polymarket BTC Up/Down 15m Event Monitor")
-    logger.info("="*80)
+    """Main entry point."""
+    print_startup_banner()
 
-    # Check if rich UI should be used
-    use_rich = config.monitoring.enable_terminal_ui
+    # Display interval info
+    interval_info = get_current_interval_info()
+    logger.info(f"Current interval: {interval_info['current_timestamp']}")
+    logger.info(f"Progress: {interval_info['progress_percent']}%")
+    logger.info(f"Remaining: {interval_info['remaining_seconds']}s")
 
-    # Create and run monitor
-    monitor = BTCMonitor(use_rich_ui=use_rich)
+    # Create monitor
+    monitor = BTCMonitor()
+
+    # Setup signal handlers
+    def signal_handler():
+        logger.info("Received shutdown signal")
+        asyncio.create_task(monitor.shutdown())
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     try:
         # Initialize
@@ -266,12 +286,12 @@ async def main():
             return 1
 
         # Start monitoring
-        await monitor.start_monitoring()
+        await monitor.start()
 
     except KeyboardInterrupt:
-        logger.info("\n⚠️  Interrupted by user")
+        logger.info("Interrupted by user")
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logger.error(f"Fatal error: {e}")
         return 1
     finally:
         await monitor.shutdown()
@@ -284,5 +304,5 @@ if __name__ == "__main__":
         exit_code = asyncio.run(main())
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        print("\n👋 Goodbye!")
+        console.print("\n[yellow]Goodbye![/yellow]")
         sys.exit(0)

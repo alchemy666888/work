@@ -1,1 +1,1 @@
-"""Tests for Polymarket BTC Monitor"""
+"""Test suite for Polymarket BTC Monitor"""
