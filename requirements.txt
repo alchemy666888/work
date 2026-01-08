@@ -1,27 +1,24 @@
-# Polymarket BTC Monitor - Dependencies
-
-# Polymarket API client (Python >=3.12)
-polymarket-apis>=0.1.0
+# Polymarket BTC Up/Down 15m Event Monitor - Dependencies
 
 # WebSocket support
 websockets>=12.0
 
-# Async support
+# Async HTTP client
 aiohttp>=3.9.0
 
-# Terminal UI
-rich>=13.7.0
-blessed>=1.20.0
-
-# Configuration
+# Environment variables
 python-dotenv>=1.0.0
 
-# Data handling
-pandas>=2.1.0
+# Terminal UI with Rich
+rich>=13.7.0
 
-# Logging
-colorlog>=6.8.0
+# Data validation with Pydantic
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Optional but recommended
+loguru>=0.7.0
 
 # Testing
 pytest>=7.4.0
-pytest-asyncio>=0.21.0
+pytest-asyncio>=0.23.0

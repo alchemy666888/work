@@ -1,45 +1,67 @@
-# 🚀 Polymarket BTC Up/Down 15m Event Monitor
+# Polymarket BTC Up/Down 15m Event Monitor
 
 A real-time WebSocket-based monitoring system for Polymarket's Bitcoin price prediction markets with 15-minute intervals.
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-## 📋 Features
+## Features
 
-- **Real-time Market Monitoring**: WebSocket connection for live market data
+- **Real-time Market Monitoring**: Pure WebSocket connection for live market data
 - **BTC Market Discovery**: Automatically finds BTC 15-minute prediction markets
 - **Live Odds Tracking**: Monitor up/down probabilities in real-time
-- **Alert System**: Get notified of significant price changes and volume spikes
+- **Alert System**: Get notified of price swings, volume spikes, and market closing
 - **Rich Terminal UI**: Beautiful console dashboard with live updates
-- **Multiple Notification Channels**: Console, Telegram, and Discord alerts
-- **Configurable Thresholds**: Customize alert triggers and update intervals
+- **Async Architecture**: Built with asyncio, aiohttp, and websockets
+- **Pydantic Models**: Type-safe data validation and configuration
 
-## 🎯 Project Structure
+## Project Structure
 
 ```
 polymarket-btc-monitor/
-├── src/
-│   ├── core/
-│   │   ├── market_discovery.py    # Find and filter BTC markets
-│   │   └── websocket_client.py    # WebSocket connection & data processing
-│   ├── alerts/
-│   │   └── alert_system.py        # Alert detection and notifications
-│   ├── ui/
-│   │   └── terminal_dashboard.py  # Terminal UI components
-│   └── utils/
-│       ├── config.py               # Configuration management
-│       └── logger.py               # Logging setup
-├── tests/
-│   ├── test_market_discovery.py
-│   └── test_alert_system.py
-├── main.py                         # Main application entry point
-├── requirements.txt                # Python dependencies
-├── .env.example                    # Environment variables template
-└── TODO.md                         # Development roadmap
+├── main.py                 # Entry point
+├── config.py               # Configuration with pydantic-settings
+├── requirements.txt        # Dependencies
+├── .env                    # Environment variables
+├── README.md               # Documentation
+│
+├── api/
+│   ├── __init__.py
+│   └── gamma_api.py        # Gamma API client
+│
+├── ws/
+│   ├── __init__.py
+│   └── websocket_client.py # WebSocket handler
+│
+├── models/
+│   ├── __init__.py
+│   ├── market.py           # Market data models
+│   ├── market_state.py     # Market state tracker
+│   └── events.py           # WebSocket event models
+│
+├── analytics/
+│   ├── __init__.py
+│   ├── price_tracker.py    # Price analysis
+│   ├── volume_tracker.py   # Volume tracking
+│   └── alerts.py           # Alert system
+│
+├── utils/
+│   ├── __init__.py
+│   ├── time_utils.py       # Time calculations
+│   ├── formatting.py       # Rich console formatting
+│   └── logger.py           # Logging setup
+│
+├── data/
+│   └── logs/               # Event logs (gitignored)
+│
+└── tests/
+    ├── __init__.py
+    ├── test_time_utils.py
+    ├── test_models.py
+    └── test_analytics.py
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -61,7 +83,6 @@ polymarket-btc-monitor/
 
 3. **Configure environment** (optional)
    ```bash
-   cp .env.example .env
    # Edit .env with your preferences
    ```
 
@@ -70,29 +91,38 @@ polymarket-btc-monitor/
    python main.py
    ```
 
-## ⚙️ Configuration
+## Configuration
 
 Edit `.env` to customize settings:
 
 ```bash
-# Alert thresholds
-ALERT_PRICE_CHANGE_THRESHOLD=5       # Percentage change to trigger alert
-ALERT_VOLUME_SPIKE_THRESHOLD=10000   # USD volume spike threshold
+# API Settings
+GAMMA_API_BASE=https://gamma-api.polymarket.com
+WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
 
-# Update interval
-UPDATE_INTERVAL=5                     # Seconds between updates
+# Connection Settings
+PING_INTERVAL=10
+RECONNECT_BASE_DELAY=1
+MAX_RECONNECT_DELAY=30
 
-# UI settings
-ENABLE_TERMINAL_UI=true              # Use rich terminal UI
-LOG_LEVEL=INFO                       # Logging level
+# Market Settings
+BASE_SLUG=btc-updown-15m
 
-# Notifications (optional)
-TELEGRAM_BOT_TOKEN=your_token
-TELEGRAM_CHAT_ID=your_chat_id
-DISCORD_WEBHOOK_URL=your_webhook_url
+# Alert Thresholds
+PRICE_SWING_THRESHOLD=5.0      # Percentage
+PRICE_SWING_WINDOW=30          # Seconds
+VOLUME_SPIKE_MULTIPLIER=2.0
+MARKET_CLOSING_ALERT=120       # Seconds
+
+# Display Settings
+USE_RICH_OUTPUT=true
+REFRESH_RATE=1.0               # Hz
+
+# Logging
+LOG_LEVEL=INFO
 ```
 
-## 📊 Usage
+## Usage
 
 ### Basic Monitoring
 
@@ -103,29 +133,107 @@ python main.py
 ```
 
 The monitor will:
-1. Discover active BTC 15-minute markets
-2. Connect to Polymarket's WebSocket API
-3. Subscribe to market updates
-4. Display live data in the terminal
-5. Alert on significant changes
+1. Calculate current and next 15-minute interval timestamps
+2. Discover active BTC 15-minute markets using Gamma API
+3. Connect to Polymarket's WebSocket API
+4. Subscribe to market token IDs
+5. Display live data in a Rich terminal dashboard
+6. Alert on significant changes
 
 ### Terminal Dashboard
 
-The rich terminal UI shows:
-- **Header**: Uptime and market count
-- **Markets Table**: Live odds, volume, liquidity
-- **Alerts Panel**: Recent notifications
-- **Statistics**: Aggregate metrics
+The Rich terminal UI shows:
+- **Markets Table**: Live odds, probability, volume, and time remaining
+- **Color Coding**: Green for UP, Red for DOWN outcomes
+- **Alerts**: Real-time notifications for price swings and events
 
-### Simple Mode
+## Architecture
 
-To use simple text output instead of the rich UI:
+### Async Design
 
-```bash
-ENABLE_TERMINAL_UI=false python main.py
+The application uses Python's asyncio for concurrent operations:
+
+```python
+# Fetch markets concurrently
+current_task = api.get_market_by_slug(current_slug)
+next_task = api.get_market_by_slug(next_slug)
+current_market, next_market = await asyncio.gather(current_task, next_task)
+
+# Run multiple tasks
+await asyncio.gather(
+    ws_client.connect(asset_ids, handle_message),
+    run_live_dashboard(market_states),
+)
 ```
 
-## 🔧 API Integration
+### WebSocket Events
+
+Supported event types:
+- `best_bid_ask`: Price updates from order book
+- `last_trade_price`: Trade execution events
+- `book`: Full order book snapshots
+- `ping/pong`: Connection heartbeat
+
+### Market State Tracking
+
+Each market outcome (UP/DOWN) has its own state tracker:
+- Price history and moving averages
+- Trade history and volume
+- Min/max prices
+- Probability calculations
+
+## Alert Types
+
+### Price Swing Alerts
+Triggered when price changes exceed threshold:
+```
+ALERT: Price swung up by 7.50%
+```
+
+### Probability Flip Alerts
+Triggered when probability crosses 50%:
+```
+ALERT: Probability flipped above 50% (now 52.3%)
+```
+
+### Market Closing Alerts
+Triggered when market is about to close:
+```
+ALERT: Market closing in 2m 0s
+```
+
+## Testing
+
+Run the test suite:
+
+```bash
+pytest tests/ -v
+```
+
+Run specific test files:
+
+```bash
+pytest tests/test_time_utils.py -v
+pytest tests/test_models.py -v
+pytest tests/test_analytics.py -v
+```
+
+## Dependencies
+
+**Required:**
+- `websockets>=12.0` - Async WebSocket client
+- `aiohttp>=3.9.0` - Async HTTP client
+- `pydantic>=2.5.0` - Data validation
+- `pydantic-settings>=2.1.0` - Configuration management
+- `python-dotenv>=1.0.0` - Environment variables
+- `rich>=13.7.0` - Beautiful terminal output
+- `loguru>=0.7.0` - Logging
+
+**Development:**
+- `pytest>=7.4.0` - Testing framework
+- `pytest-asyncio>=0.23.0` - Async test support
+
+## API Integration
 
 ### Polymarket APIs Used
 
@@ -134,131 +242,40 @@ ENABLE_TERMINAL_UI=false python main.py
    - Used for: Searching BTC markets, getting market details
 
 2. **WebSocket API** - Real-time data
-   - Used for: Live market updates, order book, trades
-   - Channels: Market channel for public data
+   - Endpoint: `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+   - Used for: Live price updates, order book, trades
 
-### Authentication
-
-API credentials are **optional** for read-only market monitoring. Required only for:
-- Placing orders
-- Accessing private user data
-
-To add credentials:
-```bash
-POLYMARKET_API_KEY=your_key
-POLYMARKET_API_SECRET=your_secret
-POLYMARKET_PASSPHRASE=your_passphrase
-POLYMARKET_WALLET_ADDRESS=your_address
-```
-
-## 📈 Alert Types
-
-### Price Change Alerts
-Triggered when odds change by more than the threshold percentage:
-```
-⚠️  [14:23:15] WARNING: Price increased by 7.5% (from 45.0% to 52.5%)
-```
-
-### Volume Spike Alerts
-Triggered when volume increases significantly:
-```
-⚠️  [14:25:30] WARNING: Volume spiked by $15,000 (150% increase)
-```
-
-### New Market Alerts
-Triggered when a new BTC 15m market is discovered:
-```
-ℹ️  [14:20:00] INFO: New BTC market discovered: Will BTC be up in 15 minutes?
-```
-
-## 🧪 Testing
-
-Run the test suite:
-
-```bash
-pytest tests/
-```
-
-Run specific tests:
-
-```bash
-pytest tests/test_market_discovery.py -v
-pytest tests/test_alert_system.py -v
-```
-
-## 🛠️ Development
-
-### Project Status
-
-Currently in **Planning/Development Phase**. See [TODO.md](TODO.md) for the complete development roadmap.
-
-### Completed Features
-
-- ✅ Project structure setup
-- ✅ Market discovery system
-- ✅ WebSocket client implementation
-- ✅ Data processing and odds calculation
-- ✅ Alert system with multiple triggers
-- ✅ Rich terminal UI
-- ✅ Configuration management
-- ✅ Basic tests
-
-### Upcoming Features
-
-- [ ] User authentication support
-- [ ] Historical data storage
-- [ ] Web dashboard (optional)
-- [ ] Paper trading simulator
-- [ ] Multi-market comparison
-- [ ] Advanced analytics
-
-## 📚 Resources
+## Resources
 
 - [Polymarket Documentation](https://docs.polymarket.com/)
 - [WSS Overview](https://docs.polymarket.com/developers/CLOB/websocket/wss-overview)
-- [Get Markets API](https://docs.polymarket.com/developers/gamma-markets-api/get-markets)
+- [Gamma Markets API](https://docs.polymarket.com/developers/gamma-markets-api/get-markets)
 - [Gamma Structure](https://docs.polymarket.com/developers/gamma-markets-api/gamma-structure)
-- [polymarket-apis PyPI](https://pypi.org/project/polymarket-apis/)
-- [Polymarket Agents GitHub](https://github.com/Polymarket/agents)
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### No markets found
 - BTC 15-minute markets may not always be available
-- The monitor will fall back to other active BTC markets
+- The monitor will fall back to searching for active BTC markets
 - Check Polymarket website for current markets
 
 ### WebSocket connection issues
 - Check your internet connection
-- Verify Polymarket API is accessible
+- The client has automatic reconnection with exponential backoff
 - Review logs for specific error messages
 
 ### Import errors
 - Ensure Python 3.12+ is installed
 - Reinstall dependencies: `pip install -r requirements.txt --upgrade`
 
-## 📝 License
+## License
 
 MIT License - See LICENSE file for details
 
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## ⚠️ Disclaimer
+## Disclaimer
 
 This tool is for educational and informational purposes only. It monitors publicly available market data from Polymarket. Always do your own research before making trading decisions.
 
-## 📞 Support
-
-- Issues: [GitHub Issues](https://github.com/alchemy666888/work/issues)
-- Discussions: Use GitHub Discussions
-
 ---
 
-**Built with ❤️ for the Polymarket community**
+**Built with Python async/await architecture**
