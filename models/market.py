@@ -1,8 +1,25 @@
 """Market data models using Pydantic"""
 
+import json
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Any
+from pydantic import BaseModel, Field, field_validator
+
+
+def parse_json_string_list(value: Any) -> list:
+    """Parse a JSON string list or return as-is if already a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return []
 
 
 class Market(BaseModel):
@@ -36,6 +53,13 @@ class Market(BaseModel):
     )
     volume: Optional[float] = Field(default=0.0, description="Total trading volume")
     liquidity: Optional[float] = Field(default=0.0, description="Market liquidity")
+
+    # Validators to parse JSON string lists from API
+    @field_validator("clob_token_ids", "outcomes", "outcome_prices", mode="before")
+    @classmethod
+    def parse_json_list(cls, value: Any) -> list:
+        """Parse JSON string lists from API response."""
+        return parse_json_string_list(value)
 
     class Config:
         populate_by_name = True
