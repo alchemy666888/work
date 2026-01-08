@@ -1,7 +1,7 @@
 """WebSocket event models"""
 
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Optional, Any
+from pydantic import BaseModel, Field, field_validator
 
 
 class WebSocketEvent(BaseModel):
@@ -63,22 +63,53 @@ class LastTradePriceEvent(WebSocketEvent):
         return None
 
 
+class OrderBookEntry(BaseModel):
+    """Single order book entry (bid or ask)"""
+
+    price: str
+    size: str
+
+    class Config:
+        extra = "allow"
+
+
 class OrderBookEvent(WebSocketEvent):
     """Order book snapshot/update event"""
 
-    bids: Optional[list[tuple[str, str]]] = Field(
-        default=None, description="List of (price, size) bid tuples"
+    bids: Optional[list[OrderBookEntry]] = Field(
+        default=None, description="List of bid entries"
     )
-    asks: Optional[list[tuple[str, str]]] = Field(
-        default=None, description="List of (price, size) ask tuples"
+    asks: Optional[list[OrderBookEntry]] = Field(
+        default=None, description="List of ask entries"
     )
+
+    @field_validator("bids", "asks", mode="before")
+    @classmethod
+    def parse_order_book_entries(cls, value: Any) -> Optional[list[OrderBookEntry]]:
+        """Parse order book entries from various formats."""
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return None
+
+        entries = []
+        for item in value:
+            if isinstance(item, dict):
+                # Dict format: {'price': '0.57', 'size': '721.93'}
+                entries.append(item)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                # Tuple/list format: ('0.57', '721.93') or ['0.57', '721.93']
+                entries.append({"price": str(item[0]), "size": str(item[1])})
+            else:
+                continue
+        return entries
 
     def get_best_bid(self) -> Optional[float]:
         """Get best (highest) bid price"""
         if self.bids and len(self.bids) > 0:
             try:
-                return float(self.bids[0][0])
-            except (ValueError, TypeError, IndexError):
+                return float(self.bids[0].price)
+            except (ValueError, TypeError, AttributeError):
                 pass
         return None
 
@@ -86,8 +117,8 @@ class OrderBookEvent(WebSocketEvent):
         """Get best (lowest) ask price"""
         if self.asks and len(self.asks) > 0:
             try:
-                return float(self.asks[0][0])
-            except (ValueError, TypeError, IndexError):
+                return float(self.asks[0].price)
+            except (ValueError, TypeError, AttributeError):
                 pass
         return None
 
