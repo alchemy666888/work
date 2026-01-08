@@ -269,14 +269,18 @@ async def main():
     # Create monitor
     monitor = BTCMonitor()
 
-    # Setup signal handlers
+    # Setup signal handlers (Unix only - Windows uses KeyboardInterrupt)
     def signal_handler():
         logger.info("Received shutdown signal")
         asyncio.create_task(monitor.shutdown())
 
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+    try:
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, signal_handler)
+    except NotImplementedError:
+        # Signal handlers not supported on Windows
+        pass
 
     try:
         # Initialize
