@@ -5,11 +5,9 @@ from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional
-from rich.console import Console
 
 from models.market_state import MarketState
-
-console = Console()
+from utils.logger import log_alert
 
 
 class AlertType(Enum):
@@ -258,15 +256,15 @@ class AlertManager:
         self._display_alert(alert)
 
     def _display_alert(self, alert: Alert):
-        """Display alert in terminal."""
-        colors = {
-            "info": "blue",
-            "warning": "yellow",
-            "critical": "red",
-        }
-        color = colors.get(alert.severity, "white")
-
-        console.print(f"[bold {color}]ALERT: {alert.message}[/bold {color}]")
+        """Log alert to file without interrupting terminal."""
+        log_alert(
+            severity=alert.severity,
+            message=alert.message,
+            alert_type=alert.alert_type.value,
+            market_slug=alert.market_slug,
+            outcome=alert.outcome,
+            **alert.data,
+        )
 
     def create_connection_alert(self, connected: bool) -> Alert:
         """Create connection status alert."""
