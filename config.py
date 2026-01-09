@@ -28,6 +28,10 @@ class Config(BaseSettings):
     use_rich_output: bool = True
     refresh_rate: float = 1.0  # Hz
 
+    # Web Server Settings
+    web_host: str = "0.0.0.0"
+    web_port: int = 8080
+
     # Logging
     log_level: str = "INFO"
 

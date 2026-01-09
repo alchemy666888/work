@@ -7,6 +7,7 @@ Main application entry point
 import asyncio
 import signal
 import sys
+from datetime import datetime, timezone
 from typing import Set
 
 from rich.console import Console
@@ -31,6 +32,7 @@ from utils.formatting import (
     console,
 )
 from utils.logger import setup_logger, logger
+from web.server import WebServer
 
 
 # Initialize logger
@@ -59,6 +61,17 @@ class BTCMonitor:
 
         # Market metadata: market_id -> Market
         self.markets: dict[str, Market] = {}
+
+        # Current and next market references for rolling
+        self.current_market: Market | None = None
+        self.next_market: Market | None = None
+
+        # Web server for dashboard
+        self.web_server = WebServer(
+            host=config.web_host,
+            port=config.web_port,
+            get_state=self.get_web_state,
+        )
 
         self.running = False
 
@@ -99,6 +112,10 @@ class BTCMonitor:
             current_market: Current interval market
             next_market: Next interval market
         """
+        # Store market references for rolling
+        self.current_market = current_market
+        self.next_market = next_market
+
         for market, is_current in [(current_market, True), (next_market, False)]:
             if not market:
                 continue
@@ -136,9 +153,153 @@ class BTCMonitor:
                 market.slug, market.question
             )
 
+    def get_market_asset_ids(self, market: Market) -> list[str]:
+        """Get asset IDs for a market."""
+        ids = []
+        up_token = market.get_up_token_id()
+        down_token = market.get_down_token_id()
+        if up_token:
+            ids.append(up_token)
+        if down_token:
+            ids.append(down_token)
+        return ids
+
+    async def check_and_roll_markets(self) -> bool:
+        """
+        Check if current market has ended and roll to next.
+
+        Returns:
+            True if markets were rolled
+        """
+        if not self.current_market or not self.current_market.close_date:
+            return False
+
+        now = datetime.now(timezone.utc)
+        close_date = self.current_market.close_date
+
+        # Ensure timezone-aware
+        if close_date.tzinfo is None:
+            close_date = close_date.replace(tzinfo=timezone.utc)
+
+        # Check if current market has ended
+        if now < close_date:
+            return False
+
+        logger.info(f"Market {self.current_market.slug} has ended, rolling to next...")
+
+        # Get old asset IDs to unsubscribe
+        old_asset_ids = self.get_market_asset_ids(self.current_market)
+
+        # Remove old market states
+        for asset_id in old_asset_ids:
+            if asset_id in self.market_states:
+                del self.market_states[asset_id]
+        if self.current_market.id in self.markets:
+            del self.markets[self.current_market.id]
+
+        # Unsubscribe from old assets
+        if old_asset_ids:
+            await self.ws_client.unsubscribe(old_asset_ids)
+
+        # Roll: next becomes current
+        self.current_market = self.next_market
+
+        # Update is_current flag for the rolled market
+        if self.current_market:
+            for asset_id in self.get_market_asset_ids(self.current_market):
+                if asset_id in self.market_states:
+                    self.market_states[asset_id].is_current = True
+
+        # Fetch new next market
+        async with GammaAPIClient(config.gamma_api_base) as api:
+            slugs = generate_current_and_next_slugs(config.base_slug)
+            logger.info(f"Fetching new next market: {slugs['next']}")
+            self.next_market = await api.get_market_by_slug(slugs["next"])
+
+        # Add new next market if found
+        if self.next_market:
+            self.markets[self.next_market.id] = self.next_market
+            new_asset_ids = []
+
+            up_token = self.next_market.get_up_token_id()
+            down_token = self.next_market.get_down_token_id()
+
+            if up_token:
+                self.market_states[up_token] = MarketState(
+                    market=self.next_market,
+                    outcome="UP",
+                    is_current=False,
+                )
+                up_price = self.next_market.get_up_price()
+                if up_price is not None:
+                    self.market_states[up_token].update_price(up_price)
+                new_asset_ids.append(up_token)
+
+            if down_token:
+                self.market_states[down_token] = MarketState(
+                    market=self.next_market,
+                    outcome="DOWN",
+                    is_current=False,
+                )
+                down_price = self.next_market.get_down_price()
+                if down_price is not None:
+                    self.market_states[down_token].update_price(down_price)
+                new_asset_ids.append(down_token)
+
+            # Subscribe to new assets
+            if new_asset_ids:
+                await self.ws_client.subscribe(new_asset_ids)
+
+            # Alert for new market
+            self.alert_manager.create_new_market_alert(
+                self.next_market.slug, self.next_market.question
+            )
+
+            logger.info(f"Rolled to new markets - current: {self.current_market.slug if self.current_market else 'None'}, next: {self.next_market.slug}")
+        else:
+            logger.warning("No next market available yet")
+
+        return True
+
     def get_asset_ids(self) -> Set[str]:
         """Get all asset IDs to subscribe to."""
         return set(self.market_states.keys())
+
+    def get_web_state(self) -> dict:
+        """Get current state for web dashboard."""
+        states = {}
+        for asset_id, state in self.market_states.items():
+            market = state.market
+            states[asset_id] = {
+                "asset_id": asset_id,
+                "outcome": state.outcome,
+                "is_current": state.is_current,
+                "current_price": state.current_price,
+                "first_price": state.first_price,
+                "best_bid": state.best_bid,
+                "best_ask": state.best_ask,
+                "trade_count": state.trade_count,
+                "total_volume": state.total_volume,
+                "price_change_pct": state.get_price_change_pct(),
+                "market_slug": market.slug if market else None,
+                "question": market.question if market else None,
+                "close_date": market.close_date.isoformat() if market and market.close_date else None,
+            }
+
+        markets = {}
+        for market_id, market in self.markets.items():
+            markets[market_id] = {
+                "id": market_id,
+                "slug": market.slug,
+                "question": market.question,
+                "close_date": market.close_date.isoformat() if market.close_date else None,
+            }
+
+        return {
+            "states": states,
+            "markets": markets,
+            "connected": self.ws_client.is_connected(),
+        }
 
     async def handle_market_event(self, event: WebSocketEvent):
         """
@@ -186,6 +347,9 @@ class BTCMonitor:
 
     async def run_live_dashboard(self):
         """Run a live-updating terminal dashboard."""
+        roll_check_interval = 5  # Check every 5 seconds
+        last_roll_check = 0
+
         try:
             with Live(
                 create_market_table(self.market_states),
@@ -194,6 +358,16 @@ class BTCMonitor:
             ) as live:
                 while self.running:
                     live.update(create_market_table(self.market_states))
+
+                    # Periodically check if we need to roll to next market
+                    now = asyncio.get_event_loop().time()
+                    if now - last_roll_check >= roll_check_interval:
+                        last_roll_check = now
+                        try:
+                            await self.check_and_roll_markets()
+                        except Exception as e:
+                            logger.error(f"Error checking market roll: {e}")
+
                     await asyncio.sleep(1 / config.refresh_rate)
         except asyncio.CancelledError:
             pass
@@ -233,6 +407,9 @@ class BTCMonitor:
 
         logger.info(f"Subscribing to {len(asset_ids)} assets")
 
+        # Start web server
+        await self.web_server.start()
+
         # Start dashboard in background
         dashboard_task = asyncio.create_task(self.run_live_dashboard())
 
@@ -252,6 +429,7 @@ class BTCMonitor:
         """Gracefully shutdown the monitor."""
         logger.info("Shutting down...")
         self.running = False
+        await self.web_server.stop()
         await self.ws_client.disconnect()
         logger.info("Shutdown complete")
 
@@ -265,6 +443,7 @@ async def main():
     logger.info(f"Current interval: {interval_info['current_timestamp']}")
     logger.info(f"Progress: {interval_info['progress_percent']}%")
     logger.info(f"Remaining: {interval_info['remaining_seconds']}s")
+    logger.info(f"Web dashboard: http://localhost:{config.web_port}")
 
     # Create monitor
     monitor = BTCMonitor()
